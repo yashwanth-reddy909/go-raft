@@ -56,7 +56,7 @@ func main() {
 		Port:           serverPort,
 		Role:           constants.Follower,
 		ElectionModule: election,
-		PeerConnections: make(map[string]net.Conn),
+		PeerData:       server.NewPeerData(),
 	}
 
 	// start the election ticker

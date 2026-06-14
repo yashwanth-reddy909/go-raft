@@ -16,7 +16,15 @@ const (
 )
 
 type PeerData struct {
-	VotesReceived map[string]bool
+	VotesReceived   map[string]bool
+	PeerConnections map[string]net.Conn
+}
+
+func NewPeerData() PeerData {
+	return PeerData{
+		VotesReceived:   make(map[string]bool),
+		PeerConnections: make(map[string]net.Conn),
+	}
 }
 
 type Server struct {
@@ -27,8 +35,7 @@ type Server struct {
 	ElectionModule  *Election
 	LogIndex        int
 	Logs            []string
-	PeerConnections map[string]net.Conn
-	peerData        PeerData
+	PeerData        PeerData
 	Term            int
 	CommitLogsIndex int
 	VotedFor        string
@@ -46,7 +53,7 @@ func (s *Server) GetPeerAddr() []string {
 }
 
 func (s *Server) BuildConn(peerAddr string) (net.Conn, error) {
-	if conn, ok := s.PeerConnections[peerAddr]; ok {
+	if conn, ok := s.PeerData.PeerConnections[peerAddr]; ok {
 		return conn, nil
 	}
 
@@ -55,14 +62,15 @@ func (s *Server) BuildConn(peerAddr string) (net.Conn, error) {
 		return nil, err
 	}
 
-	s.PeerConnections[peerAddr] = conn
+	s.PeerData.PeerConnections[peerAddr] = conn
+	go s.HandleConnection(conn)
 	return conn, nil
 }
 
 func (s *Server) DestoryConn(peerAddr string) {
-	if conn, ok := s.PeerConnections[peerAddr]; ok {
+	if conn, ok := s.PeerData.PeerConnections[peerAddr]; ok {
 		conn.Close()
-		delete(s.PeerConnections, peerAddr)
+		delete(s.PeerData.PeerConnections, peerAddr)
 	}
 }
 
@@ -93,10 +101,11 @@ func (s *Server) HandleSyncRequest(payload string) SyncResponse {
 		return SyncResponse{Success: false}
 	}
 
+	s.Term = syncPayload.CurrentTerm
+	s.Role = constants.Follower
 	// fetch those logs which are not present in the current server
 	// this need to be implemented or get the records on the same log
 	// go s.FetchMissingLogs(syncPayload)
-
 	return SyncResponse{Success: true}
 }
 
@@ -119,6 +128,7 @@ func (s *Server) HandleVoteRequest(payload string) VoteResponse {
 		return VoteResponse{VoteGranted: false}
 	}
 
+	s.VotedFor = voteReq.CandidateId
 	return VoteResponse{VoteGranted: true}
 }
 
@@ -131,7 +141,8 @@ func (s *Server) HandleVoteResponse(payload string) {
 		return
 	}
 
-	s.peerData.VotesReceived[voteReq.NodeId] = voteReq.VoteGranted
+	s.CheckElectionResults()
+	s.PeerData.VotesReceived[voteReq.NodeId] = voteReq.VoteGranted
 }
 
 func (s *Server) CheckElectionResults() {
@@ -140,17 +151,17 @@ func (s *Server) CheckElectionResults() {
 	}
 
 	var totalVotes = 1
-	for server := range s.peerData.VotesReceived {
-		if s.peerData.VotesReceived[server] {
+	for server := range s.PeerData.VotesReceived {
+		if s.PeerData.VotesReceived[server] {
 			totalVotes += 1
 		}
 	}
 	allNodes := s.GetPeerAddr()
 	if totalVotes >= (len(allNodes)+1)/2 || len(allNodes) == 1 {
 		fmt.Println("I won the election. New leader: ", s.Name, " Votes received: ", totalVotes)
-		s.Role = "leader"
+		s.Role = constants.Leader
 		s.LeaderNodeID = s.Name
-		s.peerData.VotesReceived = make(map[string]bool)
+		s.PeerData.VotesReceived = make(map[string]bool)
 		s.ElectionModule.ElectionTicker.Stop()
 		s.syncUp()
 	}
@@ -193,6 +204,11 @@ func (s *Server) HandleConnection(conn net.Conn) {
 		case string(constants.VoteResponse):
 			fmt.Printf("Received response vote command from %s\n", payload)
 			s.HandleVoteResponse(payload)
+		// case string(constants.ClientCommand):
+		// 	if s.Role != constants.Leader {
+		// 		fmt.Fprintf(conn, "executing on wrong role")
+
+		// 	}
 		default:
 			fmt.Printf("Unknown message type: %s\n", command)
 		}
@@ -210,7 +226,7 @@ func (s *Server) StartElection() {
 
 	s.Term++
 	s.VotedFor = s.Name
-	s.peerData.VotesReceived = make(map[string]bool)
+	s.PeerData.VotesReceived = make(map[string]bool)
 
 	fmt.Printf("Requesting votes for %d\n", len(peers))
 
@@ -238,6 +254,8 @@ func (s *Server) StartElection() {
 		}(peer)
 	}
 
+	// if there is only one node
+	// it can directly become the master
 	s.CheckElectionResults()
 }
 
@@ -277,6 +295,8 @@ func (s *Server) sendSyncRequest(shost string) {
 	fmt.Fprintf(conn, "%s:%s\n", constants.SyncCommand, payload)
 }
 
+// ticker that leader need to call
+// to keep every follower intact as a heart beat
 func (s *Server) syncUp() {
 	ticker := time.NewTicker(BroadcastPeriod * time.Second)
 	for range ticker.C {
