@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "go_raft",
+  "project_id": "f7bb2d0d-d47c-4681-abb8-c6d107299b80"
+}
