@@ -1,4 +1,4 @@
-package server
+package main
 
 import (
 	"fmt"
@@ -6,13 +6,15 @@ import (
 	"net"
 	"os"
 	"strconv"
+
+	"yashwanthreddy-909/go-raft/constants"
+	"yashwanthreddy-909/go-raft/server"
 )
 
 const (
 	minElectionIntervalSec = 3
 	maxElectionIntervalSec = 10
 )
-
 
 func main() {
 	if len(os.Args) < 2 {
@@ -45,16 +47,27 @@ func main() {
 	// start the election ticker
 	// randomize the election interval between min and max - so not all servers start the election at the same time
 	electionInterval := rand.Intn(maxElectionIntervalSec-minElectionIntervalSec) + int(minElectionIntervalSec)
-	election := NewElection(electionInterval)
-	
-	server := &Server{
-		Name: serverName,
-		Port: serverPort,
-		electionModule: election,
+	election := server.NewElection(electionInterval)
+
+	fmt.Println("Election time set to:", electionInterval)
+
+	server := &server.Server{
+		Name:           serverName,
+		Port:           serverPort,
+		Role:           constants.Follower,
+		ElectionModule: election,
+		PeerConnections: make(map[string]net.Conn),
 	}
 
 	// start the election ticker
-	go server.goElection()
+	go server.GoElection()
+
+	// register
+	err = server.Register()
+	if err != nil {
+		fmt.Printf("registering server issue: %v\n", err)
+		return
+	}
 
 	for {
 		conn, err := listener.Accept()
@@ -63,6 +76,6 @@ func main() {
 			continue
 		}
 
-		go server.handleConnection(conn)
+		go server.HandleConnection(conn)
 	}
 }

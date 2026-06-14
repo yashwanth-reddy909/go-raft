@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"yashwanthreddy-909/go-raft/utils"
@@ -35,6 +34,7 @@ func GetRegisteredServersAddr() ([]string, error) {
 		return nil, err
 	}
 
+	hosts := make([]string, 0)
 	// convert to local host:port format
 	for _, line := range lines {
 		parts := strings.Split(line, ":")
@@ -43,8 +43,8 @@ func GetRegisteredServersAddr() ([]string, error) {
 		}
 
 		hostPort := fmt.Sprintf("localhost:%s", parts[1])
-		lines = append(lines, hostPort)
+		hosts = append(hosts, hostPort)
 	}
 
-	return lines, nil
+	return hosts, nil
 }

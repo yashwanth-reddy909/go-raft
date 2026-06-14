@@ -9,7 +9,7 @@ type SyncRequest struct {
 	LeaderId      string
 	CurrentTerm   int
 	CurrentCommit int
-	suffix        []string
+	// Suffix        []string
 }
 
 type SyncResponse struct {
