@@ -3,7 +3,7 @@ package server
 import "encoding/json"
 
 func ToLog(req ClientCommand) (string, error) {
-	log := Log{key: req.key, value: req.value}
+	log := Log{Key: req.Key, Value: req.Value}
 	b, err := json.Marshal(log)
 	if err != nil {
 		return "", err

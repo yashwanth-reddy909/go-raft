@@ -9,6 +9,7 @@ import (
 
 	"yashwanthreddy-909/go-raft/constants"
 	"yashwanthreddy-909/go-raft/server"
+	"yashwanthreddy-909/go-raft/server/db"
 )
 
 const (
@@ -51,12 +52,19 @@ func main() {
 
 	fmt.Println("Election time set to:", electionInterval)
 
+	database, err := db.NewDatabase()
+	if err != nil {
+		fmt.Printf("Error creating database: %v\n", err)
+		return
+	}
+
 	server := &server.Server{
 		Name:           serverName,
 		Port:           serverPort,
 		Role:           constants.Follower,
 		ElectionModule: election,
 		PeerData:       server.NewPeerData(),
+		Db:             database,
 	}
 
 	// start the election ticker

@@ -157,21 +157,21 @@ func (s *Server) HandleVoteRequest(payload string) VoteResponse {
 	err := json.Unmarshal([]byte(payload), &voteReq)
 	if err != nil {
 		fmt.Printf("Error unmarshaling vote request payload: %v\n", err)
-		return VoteResponse{VoteGranted: false}
+		return VoteResponse{NodeId: s.FollowerAddr(), VoteGranted: false}
 	}
 
 	if voteReq.Term < s.Term {
 		fmt.Printf("Received vote request with lower term: %d, current term: %d\n", voteReq.Term, s.Term)
-		return VoteResponse{VoteGranted: false}
+		return VoteResponse{NodeId: s.FollowerAddr(), VoteGranted: false}
 	}
 
 	if voteReq.LogIndex < len(s.Logs) {
 		fmt.Printf("Received vote request with lower log index: %d, current log index: %d\n", voteReq.LogIndex, len(s.Logs))
-		return VoteResponse{VoteGranted: false}
+		return VoteResponse{NodeId: s.FollowerAddr(), VoteGranted: false}
 	}
 
 	s.VotedFor = voteReq.CandidateId
-	return VoteResponse{VoteGranted: true}
+	return VoteResponse{NodeId: s.FollowerAddr(), VoteGranted: true}
 }
 
 func (s *Server) HandleVoteResponse(payload string) {
@@ -301,9 +301,9 @@ func (s *Server) HandleCommand(payload string) (string, error) {
 		return "", err
 	}
 
-	switch req.coomandType {
+	switch req.CommandType {
 	case string(constants.Get):
-		value, err := s.Db.GetKey(req.key)
+		value, err := s.Db.GetKey(req.Key)
 		if err != nil {
 			fmt.Printf("Error reading from database: %v\n", err)
 			return "", err
@@ -326,7 +326,7 @@ func (s *Server) HandleCommand(payload string) (string, error) {
 		s.advanceCommitIndex() // covers single-node clusters, where self is already a majority
 		s.waitForCommit(index)
 
-		err = s.Db.SetKey(req.key, req.value)
+		err = s.Db.SetKey(req.Key, req.Value)
 		if err != nil {
 			fmt.Printf("Error writing to database: %v\n", err)
 			return "", err
@@ -334,7 +334,7 @@ func (s *Server) HandleCommand(payload string) (string, error) {
 		return "", nil
 	}
 
-	return "", fmt.Errorf("unknown command type: %s", req.coomandType)
+	return "", fmt.Errorf("unknown command type: %s", req.CommandType)
 }
 
 func (s *Server) HandleConnection(conn net.Conn) {
@@ -377,12 +377,24 @@ func (s *Server) HandleConnection(conn net.Conn) {
 		case string(constants.SyncResponse):
 			s.HandleSyncResponse(payload)
 		case string(constants.ClientCommand):
+			var resp ClientResponse
 			if s.Role != constants.Leader {
-				fmt.Fprintf(conn, "executing on wrong role")
-				continue
+				resp = ClientResponse{Success: false, Error: fmt.Sprintf("not the leader, current leader: %s", s.LeaderNodeID)}
+			} else {
+				value, err := s.HandleCommand(payload)
+				if err != nil {
+					resp = ClientResponse{Success: false, Error: err.Error()}
+				} else {
+					resp = ClientResponse{Success: true, Value: value}
+				}
 			}
 
-			s.HandleCommand(payload)
+			respPayload, err := json.Marshal(resp)
+			if err != nil {
+				fmt.Printf("Error marshaling client response: %v\n", err)
+				continue
+			}
+			fmt.Fprintf(conn, "%s:%s\n", constants.ClientResponse, respPayload)
 		default:
 			fmt.Printf("Unknown message type: %s\n", command)
 		}
@@ -414,7 +426,7 @@ func (s *Server) StartElection() {
 			}
 
 			voteReq := VoteRequest{
-				CandidateId: s.Name,
+				CandidateId: s.FollowerAddr(),
 				Term:        s.Term,
 				LogIndex:    len(s.Logs),
 			}

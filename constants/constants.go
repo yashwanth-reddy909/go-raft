@@ -10,11 +10,12 @@ package constants
 type Command string
 
 const (
-	ClientCommand string = "client_command"
-	SyncCommand   string = "sync"
-	VoteRequest   string = "vote_request"
-	VoteResponse  string = "vote_response"
-	SyncResponse  string = "sync_response"
+	ClientCommand  string = "client_command"
+	ClientResponse string = "client_response"
+	SyncCommand    string = "sync"
+	VoteRequest    string = "vote_request"
+	VoteResponse   string = "vote_response"
+	SyncResponse   string = "sync_response"
 )
 
 type Role string

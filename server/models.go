@@ -32,12 +32,18 @@ type VoteResponse struct {
 }
 
 type ClientCommand struct {
-	coomandType string
-	key         string
-	value       string
+	CommandType string `json:"commandType"`
+	Key         string `json:"key"`
+	Value       string `json:"value"`
+}
+
+type ClientResponse struct {
+	Success bool   `json:"success"`
+	Value   string `json:"value"`
+	Error   string `json:"error"`
 }
 
 type Log struct {
-	key   string
-	value string
+	Key   string `json:"key"`
+	Value string `json:"value"`
 }
