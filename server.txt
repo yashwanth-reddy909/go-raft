@@ -1,5 +1,0 @@
-server1:8001
-server1:8000
-server1:8001
-server1:8000
-server1:8001
