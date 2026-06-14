@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 	"yashwanthreddy-909/go-raft/constants"
+	"yashwanthreddy-909/go-raft/server/db"
 	"yashwanthreddy-909/go-raft/utils"
 )
 
@@ -18,12 +20,14 @@ const (
 type PeerData struct {
 	VotesReceived   map[string]bool
 	PeerConnections map[string]net.Conn
+	AckLength       map[string]int
 }
 
 func NewPeerData() PeerData {
 	return PeerData{
 		VotesReceived:   make(map[string]bool),
 		PeerConnections: make(map[string]net.Conn),
+		AckLength:       make(map[string]int),
 	}
 }
 
@@ -33,12 +37,15 @@ type Server struct {
 	Role            constants.Role
 	LeaderNodeID    string
 	ElectionModule  *Election
-	LogIndex        int
 	Logs            []string
 	PeerData        PeerData
 	Term            int
 	CommitLogsIndex int
 	VotedFor        string
+	Db              *db.Database
+
+	mu           sync.Mutex
+	commitSignal chan struct{}
 }
 
 func (s *Server) GetPeerAddr() []string {
@@ -74,6 +81,10 @@ func (s *Server) DestoryConn(peerAddr string) {
 	}
 }
 
+func (s *Server) FollowerAddr() string {
+	return fmt.Sprintf("localhost:%s", s.Port)
+}
+
 func (s *Server) HandleSyncRequest(payload string) SyncResponse {
 	fmt.Printf("Received sync request: %s\n", payload)
 	s.ElectionModule.ElectionResetChan <- true
@@ -87,7 +98,7 @@ func (s *Server) HandleSyncRequest(payload string) SyncResponse {
 	if syncPayload.CurrentTerm < s.Term {
 		fmt.Printf("Received sync request with lower term: %d, current term: %d\n", syncPayload.CurrentTerm, s.Term)
 		go s.StartElection()
-		return SyncResponse{Success: false}
+		return SyncResponse{FollowerAddr: s.FollowerAddr(), Term: s.Term, Success: false}
 	}
 
 	if syncPayload.CurrentTerm > s.Term {
@@ -98,15 +109,46 @@ func (s *Server) HandleSyncRequest(payload string) SyncResponse {
 
 	if s.Role == constants.Leader {
 		fmt.Printf("Received sync request from leader %s, but current server is already a leader\n", syncPayload.LeaderId)
-		return SyncResponse{Success: false}
+		return SyncResponse{FollowerAddr: s.FollowerAddr(), Term: s.Term, Success: false}
 	}
 
 	s.Term = syncPayload.CurrentTerm
 	s.Role = constants.Follower
-	// fetch those logs which are not present in the current server
-	// this need to be implemented or get the records on the same log
-	// go s.FetchMissingLogs(syncPayload)
-	return SyncResponse{Success: true}
+	s.appendEntries(syncPayload.PrefixLength, syncPayload.CurrentCommit, syncPayload.Suffix)
+
+	return SyncResponse{FollowerAddr: s.FollowerAddr(), Term: s.Term, Ack: len(s.Logs), Success: true}
+}
+
+func (s *Server) HandleSyncResponse(payload string) {
+	fmt.Printf("Received sync response: %s\n", payload)
+	var resp SyncResponse
+	err := json.Unmarshal([]byte(payload), &resp)
+	if err != nil {
+		fmt.Printf("Error unmarshaling sync response payload: %v\n", err)
+		return
+	}
+
+	if resp.Term > s.Term {
+		s.Term = resp.Term
+		s.Role = constants.Follower
+		s.VotedFor = ""
+		s.ElectionModule.ElectionTicker.Reset(s.ElectionModule.ElectionDuration)
+		return
+	}
+
+	if s.Role != constants.Leader || resp.Term != s.Term || resp.FollowerAddr == "" {
+		return
+	}
+
+	if resp.Success {
+		s.PeerData.AckLength[resp.FollowerAddr] = resp.Ack
+		s.advanceCommitIndex()
+		return
+	}
+
+	if s.PeerData.AckLength[resp.FollowerAddr] > 0 {
+		s.PeerData.AckLength[resp.FollowerAddr]--
+	}
 }
 
 func (s *Server) HandleVoteRequest(payload string) VoteResponse {
@@ -123,8 +165,8 @@ func (s *Server) HandleVoteRequest(payload string) VoteResponse {
 		return VoteResponse{VoteGranted: false}
 	}
 
-	if voteReq.LogIndex < s.LogIndex {
-		fmt.Printf("Received vote request with lower log index: %d, current log index: %d\n", voteReq.LogIndex, s.LogIndex)
+	if voteReq.LogIndex < len(s.Logs) {
+		fmt.Printf("Received vote request with lower log index: %d, current log index: %d\n", voteReq.LogIndex, len(s.Logs))
 		return VoteResponse{VoteGranted: false}
 	}
 
@@ -145,6 +187,12 @@ func (s *Server) HandleVoteResponse(payload string) {
 	s.PeerData.VotesReceived[voteReq.NodeId] = voteReq.VoteGranted
 }
 
+// majority returns the number of votes/acks needed for quorum,
+// counting this node plus its peers.
+func (s *Server) majority() int {
+	return (len(s.GetPeerAddr())+1)/2 + 1
+}
+
 func (s *Server) CheckElectionResults() {
 	if s.Role == constants.Leader {
 		return
@@ -156,15 +204,137 @@ func (s *Server) CheckElectionResults() {
 			totalVotes += 1
 		}
 	}
-	allNodes := s.GetPeerAddr()
-	if totalVotes >= (len(allNodes)+1)/2 || len(allNodes) == 1 {
+	if totalVotes >= s.majority() {
 		fmt.Println("I won the election. New leader: ", s.Name, " Votes received: ", totalVotes)
 		s.Role = constants.Leader
 		s.LeaderNodeID = s.Name
 		s.PeerData.VotesReceived = make(map[string]bool)
+		s.PeerData.AckLength = make(map[string]int)
 		s.ElectionModule.ElectionTicker.Stop()
 		s.syncUp()
 	}
+}
+
+// prefixLength - index up to which logs assumed match (consistency check)
+func (s *Server) appendEntries(prefixLength int, commitLength int, suffix []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(suffix) > 0 && prefixLength < len(s.Logs) {
+		s.Logs = s.Logs[:prefixLength]
+	}
+
+	if prefixLength+len(suffix) > len(s.Logs) {
+		newEntries := suffix[len(s.Logs)-prefixLength:]
+		s.Logs = append(s.Logs, newEntries...)
+	}
+
+	if commitLength > s.CommitLogsIndex {
+		s.CommitLogsIndex = commitLength
+		s.notifyCommitLocked()
+	}
+}
+
+// advanceCommitIndex moves CommitLogsIndex forward while a majority of
+// peers have acknowledged a log length beyond the current commit point.
+func (s *Server) advanceCommitIndex() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for s.CommitLogsIndex < len(s.Logs) {
+		acked := 1 // self
+		for _, ack := range s.PeerData.AckLength {
+			if ack > s.CommitLogsIndex {
+				acked++
+			}
+		}
+		if acked < s.majority() {
+			break
+		}
+		s.CommitLogsIndex++
+		s.notifyCommitLocked()
+	}
+}
+
+// notifyCommitLocked wakes any goroutines blocked in waitForCommit.
+// Caller must hold s.mu.
+func (s *Server) notifyCommitLocked() {
+	if s.commitSignal != nil {
+		close(s.commitSignal)
+		s.commitSignal = nil
+	}
+}
+
+// waitForCommit blocks until the log entry at index (1-based, i.e.
+// len(s.Logs) at append time) has been replicated to a majority of nodes.
+func (s *Server) waitForCommit(index int) {
+	for {
+		s.mu.Lock()
+		if s.CommitLogsIndex >= index {
+			s.mu.Unlock()
+			return
+		}
+		if s.commitSignal == nil {
+			s.commitSignal = make(chan struct{})
+		}
+		ch := s.commitSignal
+		s.mu.Unlock()
+		<-ch
+	}
+}
+
+// replicateLog sends the current log suffix to every peer via SyncCommand.
+// Acks are processed asynchronously by HandleSyncResponse, which advances
+// CommitLogsIndex once a majority of peers have caught up.
+func (s *Server) replicateLog() {
+	for _, peer := range s.GetPeerAddr() {
+		go s.sendSyncRequest(peer)
+	}
+}
+
+func (s *Server) HandleCommand(payload string) (string, error) {
+	fmt.Printf("Received client command: %s\n", payload)
+	var req ClientCommand
+	err := json.Unmarshal([]byte(payload), &req)
+	if err != nil {
+		fmt.Printf("Error unmarshaling client request payload: %v\n", err)
+		return "", err
+	}
+
+	switch req.coomandType {
+	case string(constants.Get):
+		value, err := s.Db.GetKey(req.key)
+		if err != nil {
+			fmt.Printf("Error reading from database: %v\n", err)
+			return "", err
+		}
+
+		return value, nil
+	case string(constants.Put):
+		log, err := ToLog(req)
+		if err != nil {
+			fmt.Printf("converting to log: %v\n", err)
+			return "", err
+		}
+
+		s.mu.Lock()
+		s.Logs = append(s.Logs, log)
+		index := len(s.Logs)
+		s.mu.Unlock()
+
+		s.replicateLog()
+		s.advanceCommitIndex() // covers single-node clusters, where self is already a majority
+		s.waitForCommit(index)
+
+		err = s.Db.SetKey(req.key, req.value)
+		if err != nil {
+			fmt.Printf("Error writing to database: %v\n", err)
+			return "", err
+		}
+		return "", nil
+	}
+
+	return "", fmt.Errorf("unknown command type: %s", req.coomandType)
 }
 
 func (s *Server) HandleConnection(conn net.Conn) {
@@ -204,11 +374,15 @@ func (s *Server) HandleConnection(conn net.Conn) {
 		case string(constants.VoteResponse):
 			fmt.Printf("Received response vote command from %s\n", payload)
 			s.HandleVoteResponse(payload)
-		// case string(constants.ClientCommand):
-		// 	if s.Role != constants.Leader {
-		// 		fmt.Fprintf(conn, "executing on wrong role")
+		case string(constants.SyncResponse):
+			s.HandleSyncResponse(payload)
+		case string(constants.ClientCommand):
+			if s.Role != constants.Leader {
+				fmt.Fprintf(conn, "executing on wrong role")
+				continue
+			}
 
-		// 	}
+			s.HandleCommand(payload)
 		default:
 			fmt.Printf("Unknown message type: %s\n", command)
 		}
@@ -242,7 +416,7 @@ func (s *Server) StartElection() {
 			voteReq := VoteRequest{
 				CandidateId: s.Name,
 				Term:        s.Term,
-				LogIndex:    s.LogIndex,
+				LogIndex:    len(s.Logs),
 			}
 
 			payload, err := json.Marshal(voteReq)
@@ -281,10 +455,14 @@ func (s *Server) sendSyncRequest(shost string) {
 		return
 	}
 
+	prefixLength := min(s.PeerData.AckLength[shost], len(s.Logs))
+
 	syncReq := SyncRequest{
 		LeaderId:      fmt.Sprintf("%s:%s", s.Name, s.Port),
 		CurrentTerm:   s.Term,
 		CurrentCommit: s.CommitLogsIndex,
+		PrefixLength:  prefixLength,
+		Suffix:        s.Logs[prefixLength:],
 	}
 
 	payload, err := json.Marshal(syncReq)
@@ -300,6 +478,11 @@ func (s *Server) sendSyncRequest(shost string) {
 func (s *Server) syncUp() {
 	ticker := time.NewTicker(BroadcastPeriod * time.Second)
 	for range ticker.C {
+		if s.Role != constants.Leader {
+			ticker.Stop()
+			return
+		}
+
 		allServers := s.GetPeerAddr()
 		for _, shost := range allServers {
 			s.sendSyncRequest(shost)

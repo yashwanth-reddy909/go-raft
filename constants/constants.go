@@ -24,3 +24,10 @@ const (
 	Candidate Role = "candidate"
 	Leader    Role = "leader"
 )
+
+type ClientCommandType string
+
+const (
+	Get ClientCommandType = "get"
+	Put ClientCommandType = "put"
+)

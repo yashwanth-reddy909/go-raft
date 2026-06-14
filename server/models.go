@@ -9,11 +9,15 @@ type SyncRequest struct {
 	LeaderId      string
 	CurrentTerm   int
 	CurrentCommit int
-	// Suffix        []string
+	PrefixLength  int
+	Suffix        []string
 }
 
 type SyncResponse struct {
-	Success bool
+	FollowerAddr string
+	Term         int
+	Ack          int
+	Success      bool
 }
 
 type VoteRequest struct {
@@ -25,4 +29,15 @@ type VoteRequest struct {
 type VoteResponse struct {
 	NodeId      string
 	VoteGranted bool
+}
+
+type ClientCommand struct {
+	coomandType string
+	key         string
+	value       string
+}
+
+type Log struct {
+	key   string
+	value string
 }
